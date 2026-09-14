@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Supex Radar — log aggregator TUI
+set -e
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SUPEX_ROOT="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+_needs_workspace=true
+for arg in "$@"; do
+  [ "$arg" = "--tests" ] && _needs_workspace=false && break
+done
+
+if $_needs_workspace && [ -z "${SUPEX_WORKSPACE:-}" ]; then
+  echo "Error: SUPEX_WORKSPACE is not set." >&2
+  echo "Export it to your project workspace root, e.g.:" >&2
+  echo "  export SUPEX_WORKSPACE=/path/to/your/project" >&2
+  exit 1
+fi
+
+exec uv run --project "$SUPEX_ROOT/devtools/radar" radar "$@"

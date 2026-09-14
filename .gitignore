@@ -1,0 +1,21 @@
+/.idea/
+*.iml
+settings.local.json
+.mcp.json
+.direnv/
+/.tmp/
+.DS_Store
+/.code/
+.plan-runner/
+
+# vcad sidecar build artifacts
+/vcad/sidecar/target/
+
+# vendored submodule build artifacts
+/vcad/vendor/vcad/target/
+/vcad/vendor/loon/target/
+
+# vcad viewer build artifacts
+/vcad/viewer/node_modules/
+/vcad/viewer/dist/
+/vcad/viewer/src-tauri/target/

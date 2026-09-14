@@ -1,0 +1,12 @@
+[submodule "vcad/vendor/vcad"]
+	path = vcad/vendor/vcad
+	url = https://github.com/ecto/vcad.git
+[submodule "vcad/vendor/loon"]
+	path = vcad/vendor/loon
+	url = https://github.com/ecto/loon.git
+[submodule "devtools/docgen/sketchup-api-stubs"]
+	path = devtools/docgen/sketchup-api-stubs
+	url = https://github.com/SketchUp/ruby-api-stubs.git
+[submodule "vcad/vendor/tang"]
+	path = vcad/vendor/tang
+	url = https://github.com/ecto/tang.git
