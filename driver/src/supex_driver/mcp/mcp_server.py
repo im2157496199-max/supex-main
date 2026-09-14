@@ -1,0 +1,688 @@
+import importlib.metadata
+import json
+import logging
+import os
+import sys
+from typing import Any
+
+# Configure logging BEFORE importing the MCP server to prevent rich handler installation
+_mcp_handler = logging.StreamHandler(sys.stderr)
+_mcp_formatter = logging.Formatter(
+    fmt="%(asctime)s|%(levelname)s|%(name)s|%(message)s",
+)
+_mcp_formatter.default_time_format = "%Y-%m-%dT%H:%M:%S"
+_mcp_formatter.default_msec_format = "%s.%03d"
+_mcp_handler.setFormatter(_mcp_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_mcp_handler])
+
+from mcp.server.mcpserver import Context, MCPServer
+
+# Type alias for MCP Context (generic with Any for lifespan/request types)
+McpContext = Context[Any, Any]
+
+from supex_driver import __version__
+from supex_driver.connection import get_sketchup_connection
+from supex_driver.connection.sketchup_exceptions import (
+    SketchUpConnectionError,
+    SketchUpProtocolError,
+    SketchUpRemoteError,
+    SketchUpTimeoutError,
+)
+from supex_driver.connection.vcad_viewer_relay import (
+    VCADViewerCapabilityError,
+    VCADViewerError,
+    VCADViewerNotConnectedError,
+    VCADViewerProtocolError,
+    VCADViewerTimeoutError,
+    get_vcad_viewer_relay,
+)
+
+# Logger instance (configured when server starts)
+logger = logging.getLogger("supex.mcp")
+
+# MCP client identification (captured from clientInfo during initialization)
+_mcp_client_name: str | None = None
+
+
+def get_agent_name(ctx: McpContext | None = None) -> str:
+    """Get agent name from MCP client info or environment.
+
+    Priority:
+    1. MCP clientInfo.name (from session.client_params.client_info)
+    2. SUPEX_AGENT environment variable
+    3. Default to "mcp"
+    """
+    global _mcp_client_name
+
+    # Try to get from Context
+    if ctx is not None:
+        try:
+            # Access: ctx.request_context.session.client_params.client_info.name
+            request_context = getattr(ctx, "request_context", None)
+            if request_context:
+                session = getattr(request_context, "session", None)
+                if session:
+                    client_params = getattr(session, "client_params", None)
+                    if client_params:
+                        client_info = getattr(client_params, "client_info", None)
+                        if client_info:
+                            raw_name = getattr(client_info, "name", None)
+                            if raw_name and isinstance(raw_name, str):
+                                name: str = raw_name
+                                logger.info(
+                                    f"Got client name from MCP clientInfo: {name}"
+                                )
+                                _mcp_client_name = name
+                                return name
+        except Exception as e:
+            logger.debug(f"Error accessing MCP clientInfo: {e}")
+
+    # Use stored MCP client name if available
+    if _mcp_client_name:
+        return _mcp_client_name
+
+    # Fallback to environment variable
+    if agent := os.environ.get("SUPEX_AGENT"):
+        return agent
+
+    # Default
+    return "mcp"
+
+
+# Flag to track if startup info has been logged
+_startup_logged = False
+
+
+def log_startup_info() -> None:
+    """Log server startup information. Only runs once."""
+    global _startup_logged
+    if _startup_logged:
+        return
+    _startup_logged = True
+
+    logger.info(f"Supex MCP Server version {__version__} starting up")
+    logger.info(f"MCP SDK version: {importlib.metadata.version('mcp')}")
+    logger.info(f"SUPEX_WORKSPACE: {os.environ.get('SUPEX_WORKSPACE', 'not set')}")
+
+
+# Create MCP server
+mcp = MCPServer("Supex")
+
+
+def call_tool(
+    ctx: McpContext,
+    method: str,
+    params: dict[str, Any] | None = None,
+    operation: str = "operation",
+) -> str:
+    """Execute a tool call with standardized error handling.
+
+    Args:
+        ctx: MCP request context
+        method: Tool method name to call
+        params: Optional parameters for the tool
+        operation: Description for error logging
+
+    Returns:
+        JSON string with result or error information
+    """
+    try:
+        sketchup = get_sketchup_connection(agent=get_agent_name(ctx))
+        result = sketchup.send_command(
+            method=method, params=params or {}, request_id=ctx.request_id
+        )
+        return json.dumps(result)
+    except (SketchUpConnectionError, SketchUpTimeoutError) as e:
+        logger.error(f"Connection error during {operation}: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "connection"}
+        )
+    except SketchUpProtocolError as e:
+        logger.error(f"Protocol error during {operation}: {e}")
+        return json.dumps({"success": False, "error": str(e), "error_type": "protocol"})
+    except SketchUpRemoteError as e:
+        logger.error(f"Remote error during {operation}: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": e.message,
+                "error_type": "remote",
+                "error_code": e.code,
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error during {operation}: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "unexpected"}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unified status tool
+# ---------------------------------------------------------------------------
+
+
+def _check_sketchup(ctx: McpContext) -> dict[str, Any]:
+    """Probe SketchUp bridge connectivity. Returns a subsystem dict."""
+    try:
+        sketchup = get_sketchup_connection(agent=get_agent_name(ctx))
+        result = sketchup.send_command(
+            method="ping", params={}, request_id=ctx.request_id
+        )
+        return {
+            "status": "connected",
+            "version": result.get("version", "unknown"),
+            "message": "SketchUp is connected and responding",
+        }
+    except (SketchUpConnectionError, SketchUpTimeoutError) as e:
+        return {
+            "status": "disconnected",
+            "version": None,
+            "message": str(e),
+        }
+    except (SketchUpProtocolError, SketchUpRemoteError) as e:
+        msg = e.message if isinstance(e, SketchUpRemoteError) else str(e)
+        return {
+            "status": "error",
+            "version": None,
+            "message": msg,
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error checking SketchUp status: {e}")
+        return {
+            "status": "error",
+            "version": None,
+            "message": str(e),
+        }
+
+
+def _check_console_capture(ctx: McpContext, sketchup_connected: bool) -> dict[str, Any]:
+    """Probe console capture status. Skipped when SketchUp is unreachable."""
+    if not sketchup_connected:
+        return {"capturing": False, "log_file": None}
+    try:
+        sketchup = get_sketchup_connection(agent=get_agent_name(ctx))
+        result = sketchup.send_command(
+            method="console_capture_status", params={}, request_id=ctx.request_id
+        )
+        return {
+            "capturing": result.get("capturing", False),
+            "log_file": result.get("log_file"),
+        }
+    except Exception:
+        return {"capturing": False, "log_file": None}
+
+
+@mcp.tool()
+def check_status(ctx: McpContext) -> str:
+    """Check overall system health: SketchUp bridge, console capture, VCAD sidecar, and VCAD viewer.
+
+    Returns a single JSON object with per-subsystem status and a top-level
+    ``status`` field: ``"ok"`` (all reachable), ``"degraded"`` (SketchUp ok
+    but VCAD issue), or ``"error"`` (SketchUp unreachable).
+    """
+    sketchup = _check_sketchup(ctx)
+    su_connected = sketchup["status"] == "connected"
+
+    console_capture = _check_console_capture(ctx, su_connected)
+
+    # VCAD health (lazy import to avoid circular dependency)
+    from supex_driver.mcp.vcad_diagnostics import get_vcad_health_snapshot
+
+    vcad = get_vcad_health_snapshot()
+
+    # Derive top-level status
+    if not su_connected:
+        top_status = "error"
+    elif vcad["vcad_sidecar"].get("status") not in ("connected", "unknown"):
+        top_status = "degraded"
+    else:
+        top_status = "ok"
+
+    return json.dumps({
+        "status": top_status,
+        "sketchup": sketchup,
+        "console_capture": console_capture,
+        "vcad_sidecar": vcad["vcad_sidecar"],
+        "vcad_viewer": vcad["vcad_viewer"],
+    })
+
+
+# Export functionality
+@mcp.tool()
+def export_scene(ctx: McpContext, format: str = "skp") -> str:
+    """Export the current SketchUp scene
+
+    Args:
+        format: Export format (skp, obj, stl, png, jpg, jpeg)
+    """
+    return call_tool(ctx, "export_scene", {"format": format}, "export_scene")
+
+
+# Ruby code evaluation
+@mcp.tool()
+def eval_ruby(ctx: McpContext, code: str) -> str:
+    """Evaluate arbitrary Ruby code in SketchUp context
+
+    Args:
+        code: Ruby code to execute
+    """
+    try:
+        logger.info(f"Evaluating Ruby code ({len(code)} characters)")
+
+        sketchup = get_sketchup_connection(agent=get_agent_name(ctx))
+
+        result = sketchup.send_command(
+            method="eval_ruby", params={"code": code}, request_id=ctx.request_id
+        )
+
+        # Format response consistently
+        response = {
+            "success": True,
+            "result": result.get("content", [{"text": "Success"}])[0].get(
+                "text", "Success"
+            )
+            if isinstance(result.get("content"), list)
+            and len(result.get("content", [])) > 0
+            else result.get("result", "Success"),
+        }
+
+        return json.dumps(response)
+    except (SketchUpConnectionError, SketchUpTimeoutError) as e:
+        logger.error(f"Connection error evaluating Ruby code: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "connection"}
+        )
+    except SketchUpProtocolError as e:
+        logger.error(f"Protocol error evaluating Ruby code: {e}")
+        return json.dumps({"success": False, "error": str(e), "error_type": "protocol"})
+    except SketchUpRemoteError as e:
+        logger.error(f"Remote error evaluating Ruby code: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": e.message,
+                "error_type": "remote",
+                "error_code": e.code,
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error evaluating Ruby code: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "unexpected"}
+        )
+
+
+# File-based Ruby evaluation tools
+@mcp.tool()
+def eval_ruby_file(ctx: McpContext, file_path: str) -> str:
+    """Evaluate Ruby code from a file in SketchUp context
+
+    Args:
+        file_path: Path to Ruby file to execute (relative paths resolve against the workspace)
+    """
+    logger.info(f"Evaluating Ruby file: {file_path}")
+    return call_tool(ctx, "eval_ruby_file", {"file_path": file_path}, "eval_ruby_file")
+
+
+# Introspection tools
+@mcp.tool()
+def get_model_info(ctx: McpContext) -> str:
+    """Get basic information about the current SketchUp model
+
+    Returns model statistics including:
+    - title: Model title
+    - units: Current units (meters, feet, etc.)
+    - num_faces: Number of faces in the model
+    - num_edges: Number of edges
+    - num_groups: Number of groups
+    - num_components: Number of component instances
+    - modified: Whether model has unsaved changes
+    """
+    return call_tool(ctx, "get_model_info", {}, "get_model_info")
+
+
+@mcp.tool()
+def list_entities(ctx: McpContext, entity_type: str = "all") -> str:
+    """List entities in the model
+
+    Args:
+        entity_type: Type to filter - one of: faces, edges, groups, components, all
+
+    Returns list of entities with type, name, and layer information
+    """
+    return call_tool(
+        ctx, "list_entities", {"entity_type": entity_type}, "list_entities"
+    )
+
+
+@mcp.tool()
+def get_entity(ctx: McpContext, entity_id: int) -> str:
+    """Get the full state of one entity by its entity ID
+
+    Args:
+        entity_id: SketchUp entity ID (as returned by list_entities or get_selection)
+
+    Returns type, name, layer, material, hidden/visible/locked flags, bounds and
+    dimensions (inches, SketchUp internal units). Groups and component instances
+    also report definition name, transformation (16 values, row-major) and origin.
+    """
+    return call_tool(ctx, "get_entity", {"entity_id": entity_id}, "get_entity")
+
+
+@mcp.tool()
+def get_selection(ctx: McpContext) -> str:
+    """Get currently selected entities in SketchUp
+
+    Returns:
+    - count: Number of selected entities
+    - entities: List of selected entities with details (type, properties)
+    """
+    return call_tool(ctx, "get_selection", {}, "get_selection")
+
+
+@mcp.tool()
+def get_layers(ctx: McpContext) -> str:
+    """Get list of layers (tags) in the model
+
+    Returns list of layers with name, visible state, and entity count
+    """
+    return call_tool(ctx, "get_layers", {}, "get_layers")
+
+
+@mcp.tool()
+def get_materials(ctx: McpContext) -> str:
+    """Get list of materials in the model
+
+    Returns list of materials with name, color, and texture information
+    """
+    return call_tool(ctx, "get_materials", {}, "get_materials")
+
+
+@mcp.tool()
+def get_camera_info(ctx: McpContext) -> str:
+    """Get current camera position and settings
+
+    Returns camera eye position, target, up vector, and field of view
+    """
+    return call_tool(ctx, "get_camera_info", {}, "get_camera_info")
+
+
+@mcp.tool()
+def take_screenshot(
+    ctx: McpContext,
+    width: int = 1920,
+    height: int = 1080,
+    transparent: bool = False,
+    output_path: str | None = None,
+) -> str:
+    """Take a screenshot of the current SketchUp view and save to disk
+
+    IMPORTANT: Returns file path only (not image data) to save context tokens!
+    Use Read tool to view the screenshot if needed.
+
+    Args:
+        width: Image width in pixels (default 1920)
+        height: Image height in pixels (default 1080)
+        transparent: Whether to use transparent background (default False)
+        output_path: Optional custom path for screenshot. If not provided,
+                     saves to .tmp/screenshots/ with timestamp
+
+    Returns:
+        JSON with file_path where screenshot was saved (~200 tokens vs 21k!)
+        Use Read tool on the file_path to view screenshot if necessary
+    """
+    params: dict[str, int | bool | str] = {
+        "width": width,
+        "height": height,
+        "transparent": transparent,
+    }
+    if output_path:
+        params["output_path"] = output_path
+    return call_tool(ctx, "take_screenshot", params, "take_screenshot")
+
+
+@mcp.tool()
+def take_batch_screenshots(
+    ctx: McpContext,
+    shots: list[dict[str, Any]],
+    output_dir: str | None = None,
+    base_name: str = "screenshot",
+    width: int = 1920,
+    height: int = 1080,
+    transparent: bool = False,
+    restore_camera: bool = True,
+) -> str:
+    """Take multiple screenshots with different camera positions in a single batch.
+
+    Designed for zero visual flicker - renders happen offscreen while preserving
+    the user's current view. Camera is restored after batch completes.
+
+    Args:
+        shots: List of shot specifications. Each shot is a dict with:
+            - camera: Camera specification dict with:
+                - type: Camera type (default "standard_view"):
+                    - "standard_view" with view: "top"|"front"|"right"|"left"|"back"|"bottom"|"iso"
+                    - "custom" with eye: [x,y,z], target: [x,y,z], optional up/fov/perspective
+                    - "zoom_entity" with entity_ids: [id1, id2, ...], optional padding
+                - zoom_extents: Boolean flag (default true). When true, automatically adjusts
+                    camera distance to fit all visible content after setting direction.
+                    For "custom" type: Set to false if you need exact eye/target positions!
+                    When true, your specified positions will be overridden to fit content.
+            - name: Optional custom name for the shot (used in filename)
+            - width: Optional width override for this shot
+            - height: Optional height override for this shot
+            - isolate: Optional entity_id of Group/ComponentInstance to isolate.
+                       When specified, opens the entity for editing and enables
+                       "Hide rest of Model" so only that subtree is visible.
+                       zoom_extents then works only on the isolated content.
+        output_dir: Directory for screenshots. Defaults to .tmp/batch_screenshots/timestamp/
+        base_name: Base filename for screenshots (default "screenshot")
+        width: Default width for all shots (default 1920)
+        height: Default height for all shots (default 1080)
+        transparent: Use transparent background (default False)
+        restore_camera: Restore original camera after batch (default True)
+
+    Returns:
+        JSON with success status, output directory, and array of results for each shot.
+        Each result contains file_path (on success) or error message (on failure).
+
+    Example:
+        take_batch_screenshots(
+            shots=[
+                {"camera": {"type": "standard_view", "view": "front"}, "name": "front"},
+                {"camera": {"type": "standard_view", "view": "top"}, "name": "full"},
+                {"camera": {"type": "custom", "eye": [100,100,100], "target": [0,0,0],
+                            "zoom_extents": false}, "name": "exact_position"},
+                {"camera": {"type": "standard_view", "view": "iso"}, "isolate": 12345,
+                            "name": "chair_detail"}
+            ],
+            base_name="model_view"
+        )
+    """
+    params: dict[str, Any] = {
+        "shots": shots,
+        "base_name": base_name,
+        "width": width,
+        "height": height,
+        "transparent": transparent,
+        "restore_camera": restore_camera,
+    }
+    if output_dir:
+        params["output_dir"] = output_dir
+    return call_tool(ctx, "take_batch_screenshots", params, "take_batch_screenshots")
+
+
+@mcp.tool()
+def open_model(ctx: McpContext, path: str) -> str:
+    """Open a SketchUp model file
+
+    Args:
+        path: Path to the .skp file to open (relative paths resolve against the workspace)
+
+    Returns success status and model information
+    """
+    return call_tool(ctx, "open_model", {"path": path}, "open_model")
+
+
+@mcp.tool()
+def save_model(ctx: McpContext, path: str | None = None) -> str:
+    """Save the current SketchUp model
+
+    Args:
+        path: Optional path to save to (relative paths resolve against the workspace). If not provided, saves to current location
+
+    Returns success status and saved file path
+    """
+    params = {"path": path} if path else {}
+    return call_tool(ctx, "save_model", params, "save_model")
+
+
+def _handle_viewer_error(e: VCADViewerError, operation: str) -> str:
+    """Standardized error handling for viewer relay tools."""
+    if isinstance(e, VCADViewerCapabilityError):
+        logger.error(f"Capability error during {operation}: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(e),
+                "error_code": e.error_code,
+                "error_type": "capability",
+                "details": e.details,
+            }
+        )
+    if isinstance(e, VCADViewerProtocolError):
+        logger.error(f"Protocol error during {operation}: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(e),
+                "error_code": e.error_code,
+                "error_type": "protocol",
+            }
+        )
+    if isinstance(e, VCADViewerNotConnectedError):
+        logger.error(f"Viewer not connected during {operation}: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(e),
+                "error_type": "viewer_not_connected",
+            }
+        )
+    if isinstance(e, VCADViewerTimeoutError):
+        logger.error(f"Viewer timeout during {operation}: {e}")
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(e),
+                "error_type": "timeout",
+            }
+        )
+    logger.error(f"Viewer error during {operation}: {e}")
+    return json.dumps(
+        {
+            "success": False,
+            "error": str(e),
+            "error_type": "viewer_error",
+        }
+    )
+
+
+# VCAD viewer tools
+@mcp.tool()
+def vcad_viewer_state(ctx: McpContext) -> str:
+    """Get current VCAD viewer state: camera position, selection, visible nodes."""
+    try:
+        relay = get_vcad_viewer_relay()
+        relay.require_viewer("vcad_viewer_state")
+
+        state = relay.get_viewer_state()
+        if state is None:
+            return json.dumps(
+                {
+                    "success": True,
+                    "state": None,
+                    "message": "Viewer connected but no state reported yet",
+                }
+            )
+
+        return json.dumps({"success": True, "state": state})
+    except VCADViewerError as e:
+        return _handle_viewer_error(e, "vcad_viewer_state")
+    except Exception as e:
+        logger.exception(f"Unexpected error in vcad_viewer_state: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "unexpected"}
+        )
+
+
+@mcp.tool()
+def vcad_viewer_screenshot(ctx: McpContext) -> str:
+    """Capture screenshot from VCAD viewer.
+
+    Returns metadata including workspace-relative file path (no large base64
+    payload). The screenshot PNG is saved to .tmp/vcad-viewer/ under the
+    workspace directory.
+    """
+    try:
+        relay = get_vcad_viewer_relay()
+        result = relay.request_screenshot()
+
+        if not result.get("data"):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Viewer returned empty screenshot data",
+                    "error_type": "viewer_error",
+                }
+            )
+
+        metadata = relay.save_screenshot(
+            data_b64=result["data"],
+            width=result["width"],
+            height=result["height"],
+        )
+
+        return json.dumps({"success": True, **metadata})
+    except VCADViewerError as e:
+        return _handle_viewer_error(e, "vcad_viewer_screenshot")
+    except Exception as e:
+        logger.exception(f"Unexpected error in vcad_viewer_screenshot: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "unexpected"}
+        )
+
+
+@mcp.tool()
+def vcad_viewer_focus(ctx: McpContext, node_id: str) -> str:
+    """Focus viewer camera on a specific VCAD node.
+
+    Args:
+        node_id: The VCAD node identifier to focus on.
+    """
+    try:
+        relay = get_vcad_viewer_relay()
+        relay.send_focus(node_id)
+        return json.dumps({"success": True, "node_id": node_id})
+    except VCADViewerError as e:
+        return _handle_viewer_error(e, "vcad_viewer_focus")
+    except Exception as e:
+        logger.exception(f"Unexpected error in vcad_viewer_focus: {e}")
+        return json.dumps(
+            {"success": False, "error": str(e), "error_type": "unexpected"}
+        )
+
+
+from supex_driver.mcp import vcad_diagnostics as _vcad_diagnostics  # noqa: F401, E402
+from supex_driver.mcp import vcad_tools as _vcad_tools  # noqa: F401, E402
+
+
+def main() -> None:
+    """Main entry point for the server"""
+    log_startup_info()
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()

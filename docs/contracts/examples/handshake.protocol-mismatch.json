@@ -1,0 +1,10 @@
+{
+  "success": false,
+  "error": "Protocol version mismatch: driver=1.0, sidecar=2.0",
+  "error_code": "PROTOCOL_MISMATCH",
+  "details": {
+    "expected_protocol": "1.0",
+    "actual_protocol": "2.0",
+    "operation": "vcad_place:eval"
+  }
+}

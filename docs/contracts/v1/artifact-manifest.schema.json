@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supex/contracts/v1/artifact-manifest",
+  "title": "Artifact Manifest",
+  "description": "Deterministic artifact manifest shape for VCAD evaluation results.",
+  "type": "object",
+  "required": ["status", "source_hash", "mesh_path", "finished_at"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["applied", "stale_dropped", "superseded"],
+      "description": "Artifact outcome status."
+    },
+    "node_id": {
+      "type": "string",
+      "description": "Node identifier."
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic revision counter (required when status=applied)."
+    },
+    "request_id": {
+      "type": ["string", "null"],
+      "description": "Correlation request ID."
+    },
+    "source_file": {
+      "type": "string",
+      "description": "Path to the source .cmp.oo file."
+    },
+    "source_hash": {
+      "type": "string",
+      "description": "Hash of the canonicalized source/document input."
+    },
+    "imports": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/import_entry" },
+      "description": "Import metadata snapshot (references/types only)."
+    },
+    "mesh_path": {
+      "type": "string",
+      "description": "Path to exported mesh file (DAE)."
+    },
+    "bbox": {
+      "$ref": "#/$defs/bbox",
+      "description": "Bounding box (required when status=applied)."
+    },
+    "volume": {
+      "type": "number",
+      "description": "Solid volume in cubic mm (required when status=applied)."
+    },
+    "surface_area": {
+      "type": "number",
+      "description": "Solid surface area in sq mm (required when status=applied)."
+    },
+    "queued_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the eval was queued."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the eval started."
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when the artifact was finalized."
+    },
+    "eval_duration_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Evaluation duration in milliseconds."
+    },
+    "drop_reason": {
+      "type": "string",
+      "description": "Reason for drop (required when status=stale_dropped)."
+    },
+    "supersede_reason": {
+      "type": "string",
+      "description": "Reason for supersede (required when status=superseded)."
+    },
+    "superseded_by_revision": {
+      "type": "integer",
+      "description": "Revision that superseded this artifact."
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "applied" } },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["revision", "bbox", "volume", "surface_area"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "stale_dropped" } },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["drop_reason"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "superseded" } },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["supersede_reason"]
+      }
+    }
+  ],
+  "$defs": {
+    "bbox": {
+      "type": "object",
+      "required": ["min", "max"],
+      "properties": {
+        "min": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "max": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      }
+    },
+    "import_entry": {
+      "type": "object",
+      "required": ["binding_name", "selector", "extracts"],
+      "properties": {
+        "binding_name": {
+          "type": "string",
+          "description": "Loon variable name."
+        },
+        "selector": {
+          "type": "string",
+          "description": "Source-specific selector string (e.g. entity:12345 for :host)."
+        },
+        "source": {
+          "type": "string",
+          "description": "Source keyword (e.g. host)."
+        },
+        "extracts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extract types (empty = all, e.g. [\"dims\"], [\"dims\", \"bbox\"], [\"solid\"])."
+        },
+        "resolved_type": {
+          "type": "string",
+          "description": "Resolution type (native, vcad, native_mesh)."
+        },
+        "source_node_id": {
+          "type": ["string", "null"],
+          "description": "Source node ID for vcad-type imports."
+        }
+      }
+    }
+  }
+}

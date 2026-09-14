@@ -1,0 +1,12 @@
+{
+  "type": "scene.snapshot",
+  "nodes": [
+    {
+      "node_id": "bracket",
+      "revision": 3,
+      "dae_path": "/tmp/vcad-sidecar/bracket.dae",
+      "material": {"name": "default", "r": 0.8, "g": 0.8, "b": 0.8},
+      "bbox": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}
+    }
+  ]
+}

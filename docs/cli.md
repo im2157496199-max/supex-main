@@ -1,0 +1,73 @@
+# CLI Reference
+
+The `./supex` command is the direct CLI interface for SketchUp automation.
+
+For interactive Ruby console usage, see [Interactive REPL](repl.md).
+
+`./supex reload` is CLI-only; there is no MCP tool named `reload_extension`.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `./supex status` | Check SketchUp connectivity and local docs availability |
+| `./supex reload` | Reload the SketchUp extension without restarting SketchUp |
+| `./supex eval <code>` | Evaluate inline Ruby code |
+| `./supex eval-file <path>` | Evaluate Ruby from a file (recommended workflow) |
+| `./supex info` | Show current model stats |
+| `./supex entities [type]` | List model entities (`all`, `faces`, `edges`, `groups`, `components`) |
+| `./supex entity <id>` | Show the full state of one entity (bounds, transformation, material, flags) |
+| `./supex selection` | Show current selection |
+| `./supex layers` | List layers/tags |
+| `./supex materials` | List materials |
+| `./supex camera` | Show active camera data |
+| `./supex screenshot` | Save a screenshot to disk |
+| `./supex open <path>` | Open `.skp` model |
+| `./supex save [path]` | Save current model |
+| `./supex export <format>` | Export current scene |
+
+## Common Options
+
+- `--host`, `-H`: Runtime host (default `localhost`)
+- `--port`, `-p`: Runtime port (default `9876`)
+
+`--raw`/`-r` JSON output is available on:
+- `eval`
+- `eval-file`
+- `info`
+- `entities`
+- `entity`
+- `selection`
+- `layers`
+- `materials`
+- `camera`
+
+## Screenshot Options
+
+- `--output`, `-o`: Output file path (default: generated under the workspace)
+- `--width`, `-w`: Image width (default `1920`)
+- `--height`: Image height (default `1080`)
+- `--transparent`, `-t`: Transparent background
+
+## Export Formats
+
+Runtime export currently supports:
+
+- `skp`
+- `obj`
+- `stl`
+- `png`
+- `jpg`
+- `jpeg`
+
+## Examples
+
+```bash
+./supex status
+./supex eval "Sketchup.version"
+./supex eval-file /absolute/path/to/script.rb
+./supex entities faces --raw
+./supex screenshot --width 2560 --height 1440
+./supex screenshot --output shots/iso.png --transparent
+./supex export obj
+```
